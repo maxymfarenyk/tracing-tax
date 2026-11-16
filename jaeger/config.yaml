@@ -1,0 +1,46 @@
+# Minimal Jaeger v2 config: OTLP in -> in-memory storage -> query UI.
+# Derived from the built-in all-in-one config of jaeger v2.23.0
+# (cmd/jaeger/internal/all-in-one.yaml), trimmed to what the stand needs and
+# bound to 0.0.0.0 so the collector container can reach it.
+
+service:
+  extensions: [jaeger_storage, jaeger_query, healthcheckv2]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [jaeger_storage_exporter]
+  telemetry:
+    logs:
+      level: info
+
+extensions:
+  jaeger_query:
+    storage:
+      traces: memstore
+
+  jaeger_storage:
+    backends:
+      memstore:
+        memory:
+          max_traces: 100000
+
+  healthcheckv2:
+    use_v2: true
+    http:
+      endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  jaeger_storage_exporter:
+    trace_storage: memstore

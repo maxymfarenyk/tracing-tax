@@ -1,0 +1,44 @@
+# Scenario-agnostic pass-through pipeline: every span received is forwarded.
+# Used for "no collector-side sampling" scenarios (B, C). Tail sampling
+# scenarios (D) will get their own file in this folder and are selected via
+# COLLECTOR_CONFIG in docker-compose.yml.
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlp_grpc/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_grpc/jaeger]
+  telemetry:
+    # Collector self-metrics in Prometheus format, for scraping in a later
+    # iteration (accepted/refused/sent spans, queue size, etc.).
+    metrics:
+      level: detailed
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888

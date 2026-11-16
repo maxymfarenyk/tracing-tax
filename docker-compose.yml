@@ -1,0 +1,82 @@
+# Iteration 1: gateway -> orders, traced via OTel zero-code instrumentation,
+# exported to an OTel Collector, stored and visualised in Jaeger v2.
+
+# Resource limits must be identical across all experiment scenarios.
+x-service-limits: &service-limits
+  cpus: 1.0
+  mem_limit: 512m
+
+x-otel-env: &otel-env
+  # Only traces are in scope; metrics/logs export would add unrelated overhead.
+  OTEL_TRACES_EXPORTER: otlp
+  OTEL_METRICS_EXPORTER: none
+  OTEL_LOGS_EXPORTER: none
+  OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  # Sampling is configured only here, via standard SDK env vars.
+  OTEL_TRACES_SAMPLER: ${OTEL_TRACES_SAMPLER:-parentbased_always_on}
+  OTEL_TRACES_SAMPLER_ARG: ${OTEL_TRACES_SAMPLER_ARG:-1.0}
+  # Keep health-check probes out of the traces.
+  OTEL_PYTHON_EXCLUDED_URLS: health
+
+services:
+  gateway:
+    build:
+      context: ./services
+      args:
+        SERVICE: gateway
+    image: tracing-tax/gateway:iter1
+    <<: *service-limits
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: gateway
+      ORDERS_URL: http://orders:8000
+      ERROR_RATE: ${GATEWAY_ERROR_RATE:-0}
+      SLOW_RATE: ${GATEWAY_SLOW_RATE:-0}
+    ports:
+      - "8080:8000"
+    depends_on:
+      orders:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck: &py-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  orders:
+    build:
+      context: ./services
+      args:
+        SERVICE: orders
+    image: tracing-tax/orders:iter1
+    <<: *service-limits
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: orders
+      WORK_MS: ${ORDERS_WORK_MS:-20}
+      ERROR_RATE: ${ORDERS_ERROR_RATE:-0}
+      SLOW_RATE: ${ORDERS_SLOW_RATE:-0}
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck: *py-healthcheck
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.165.0
+    <<: *service-limits
+    command: ["--config=/etc/otelcol/configs/${COLLECTOR_CONFIG:-passthrough}.yaml"]
+    volumes:
+      - ./collector/configs:/etc/otelcol/configs:ro
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.23.0
+    command: ["--config=/etc/jaeger/config.yaml"]
+    volumes:
+      - ./jaeger/config.yaml:/etc/jaeger/config.yaml:ro
+    ports:
+      - "16686:16686" # UI + query API

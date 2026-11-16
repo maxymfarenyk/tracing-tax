@@ -1,17 +1,15 @@
 [project]
 name = "tracing-tax"
 version = "0.1.0"
-description = "Add your description here"
+description = "Research stand comparing trace sampling strategies and their impact on microservice load"
 readme = "README.md"
 authors = [
     { name = "Maksym Farenyk", email = "maxfar2004@gmail.com" }
 ]
 requires-python = ">=3.14"
+# Host-side tooling (load generation, experiment runner, analysis) goes here.
+# The containerised services have their own lock: services/requirements.txt.
 dependencies = []
 
-[project.scripts]
-tracing-tax = "tracing_tax:main"
-
-[build-system]
-requires = ["uv_build>=0.12.23,<0.13.0"]
-build-backend = "uv_build"
+[tool.uv]
+package = false
