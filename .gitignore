@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+.venv/
+
+# PyCharm / IDE
+.idea/
+
+# AI
+CLAUDE.md
+
+# Environment and secrets
+.env
+.env.*
+
