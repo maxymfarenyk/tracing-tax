@@ -166,6 +166,31 @@ services:
     ports:
       - "16686:16686" # UI + query API
 
+  # --- Load generation ----------------------------------------------------
+
+  # Opt-in (profile "load"): `docker compose up` never starts load by itself.
+  # Headless: docker compose run --rm locust --headless -u 50 -r 50 -t 2m --csv /mnt/results/load/high
+  # Web UI:   docker compose --profile load up -d locust   -> http://localhost:8089
+  locust:
+    image: locustio/locust:2.47.0
+    profiles: [load]
+    # Own limits: the load generator must not compete with the measured
+    # services, and must not be throttled itself (that would cap the RPS).
+    cpus: 1.0
+    mem_limit: 512m
+    environment:
+      # Locust reads every CLI option from LOCUST_* env vars.
+      LOCUST_LOCUSTFILE: /mnt/load/locustfile.py
+      LOCUST_HOST: http://gateway:8000
+    volumes:
+      - ./load:/mnt/load:ro
+      - ./results:/mnt/results
+    ports:
+      - "8089:8089" # web UI
+    depends_on:
+      gateway:
+        condition: service_healthy
+
   # --- Monitoring ---------------------------------------------------------
 
   cadvisor:

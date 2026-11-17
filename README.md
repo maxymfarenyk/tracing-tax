@@ -44,6 +44,7 @@ chain of calls and spans, not real business behaviour.
 | Metrics storage | `prom/prometheus` | `v3.16.0` |
 | Container metrics | `ghcr.io/google/cadvisor` | `v0.60.6` |
 | Dashboards | `grafana/grafana` | `13.3.1` |
+| Load generator | `locustio/locust` | `2.47.0` |
 
 Services are a separate uv project (`services/pyproject.toml`). Their full
 dependency tree, including transitive packages and hashes, is locked in
@@ -55,8 +56,8 @@ dependency tree, including transitive packages and hashes, is locked in
 - Docker with Compose v2
 - Python 3.10+ on the host (only for the stdlib verification scripts)
 - [uv](https://docs.astral.sh/uv/) `0.12.x`, only for local development and IDE support
-- Free host ports `8080` (gateway), `16686` (Jaeger UI), `9090` (Prometheus) and
-  `3000` (Grafana)
+- Free host ports `8080` (gateway), `16686` (Jaeger UI), `9090` (Prometheus),
+  `3000` (Grafana) and `8089` (Locust web UI)
 - If your Docker daemon uses a non-default `data-root` (check with
   `docker info --format '{{.DockerRootDir}}'`), put it in a `.env` file so
   cAdvisor can read it, e.g. `DOCKER_DATA_ROOT=/mnt/hdd/docker-data`.
@@ -187,6 +188,44 @@ Prometheus scrapes every 5 s. cAdvisor only collects CPU, memory and network
 metrics (`--enable_metrics`) with a 5 s housekeeping interval, to keep its own
 overhead low.
 
+## Load generation
+
+Locust runs as a container in the same compose file, under the profile `load`,
+so `docker compose up` never starts load by itself. Every simulated user sends
+one request per second (`load/locustfile.py`), so **users = RPS**.
+
+| Level | Users = RPS | Median latency (scenario B) |
+|---|---|---|
+| low | 10 | ~120 ms |
+| high | 30 | ~240 ms |
+
+The high level is capped at 30 RPS because above that the `orders` service
+congests: median latency is 380 ms at 50 RPS, with or without tracing, which
+would hide the effect of tracing.
+
+**Headless run** (what the experiment uses), here 2 minutes at the high level:
+
+```bash
+docker compose run --rm locust --headless --users 30 --spawn-rate 30 \
+    --run-time 2m --csv /mnt/results/load/high --only-summary
+```
+
+Results land in `results/load/` (gitignored): `high_stats.csv` has RPS, request
+and failure counts and p50/p95/p99 latency. Fault-injected 5xx responses count
+as failures.
+
+**Web UI** (interactive, e.g. for the demo):
+
+```bash
+docker compose --profile load up -d locust      # open http://localhost:8089
+docker compose --profile load stop locust
+```
+
+`docker compose run` also starts Locust's dependencies (`gateway` and
+everything behind it), and it applies **its own** environment to them. If you
+start the stand with e.g. `ORDERS_ERROR_RATE=0.1`, pass the same variables to
+`docker compose run`, or Compose will quietly recreate `orders` without them.
+
 ## Configuration
 
 All knobs are environment variables read by `docker-compose.yml`. Pass them on the
@@ -255,6 +294,8 @@ monitoring/
   grafana/dashboards/    # tracing-tax.json dashboard
 scripts/verify_trace.py       # end-to-end trace check
 scripts/verify_monitoring.py  # metrics pipeline check
+load/locustfile.py     # steady load: 1 request/s per user
+results/               # experiment output (results/load/ = ad-hoc runs, gitignored)
 docker-compose.yml
 pyproject.toml         # uv project (non-package) for host-side tooling
 ```
