@@ -1,11 +1,21 @@
 # gateway -> orders -> inventory (Redis) / payments, traced via OTel zero-code
 # instrumentation, exported to an OTel Collector, stored and visualised in
-# Jaeger v2.
+# Jaeger v2. Prometheus + cAdvisor + Grafana collect resource metrics.
+
+# Fixed project name: metric labels (com.docker.compose.project) must not
+# depend on the directory the repo is cloned into.
+name: tracing-tax
 
 # Resource limits must be identical across all experiment scenarios.
 x-service-limits: &service-limits
   cpus: 1.0
   mem_limit: 512m
+
+# Monitoring has its own limits: it must not compete for the measured services'
+# budget, and its overhead is the same in every scenario.
+x-monitoring-limits: &monitoring-limits
+  cpus: 0.5
+  mem_limit: 256m
 
 x-otel-env: &otel-env
   # Only traces are in scope; metrics/logs export would add unrelated overhead.
@@ -134,7 +144,94 @@ services:
   jaeger:
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.23.0
     command: ["--config=/etc/jaeger/config.yaml"]
+    environment:
+      # Jaeger traces its own query API by default and stores those spans too,
+      # which would inflate the "spans stored" metric every time a script
+      # queries Jaeger. Its internal tracer honours standard OTel SDK env vars.
+      OTEL_TRACES_SAMPLER: always_off
     volumes:
       - ./jaeger/config.yaml:/etc/jaeger/config.yaml:ro
     ports:
       - "16686:16686" # UI + query API
+
+  # --- Monitoring ---------------------------------------------------------
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.6
+    <<: *monitoring-limits
+    privileged: true
+    devices:
+      - /dev/kmsg
+    command:
+      - --docker_only=true
+      - --housekeeping_interval=5s
+      - --enable_metrics=cpu,memory,network
+      - --store_container_labels=false
+      - --whitelisted_container_labels=com.docker.compose.project,com.docker.compose.service
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /dev/disk:/dev/disk:ro
+      # cAdvisor reads the Docker data-root from `docker info`, so it must be
+      # mounted at the same path. Set DOCKER_DATA_ROOT in .env if your daemon
+      # uses a non-default "data-root".
+      - ${DOCKER_DATA_ROOT:-/var/lib/docker}:${DOCKER_DATA_ROOT:-/var/lib/docker}:ro
+    # Not published: host port 8080 belongs to the gateway.
+
+  prometheus:
+    image: prom/prometheus:v3.16.0
+    <<: *monitoring-limits
+    cpus: 1.0
+    mem_limit: 1g
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Named volume: metrics survive `docker compose down` (not `down -v`).
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - cadvisor
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana:13.3.1
+    <<: *monitoring-limits
+    mem_limit: 512m
+    environment:
+      # Local research stand: dashboards are viewable without login
+      # (anonymous users are Viewers). Log in as admin/admin to edit or Explore.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/tracing-tax.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      # Mount only what we provision, keeping the image's other (empty)
+      # provisioning folders so Grafana doesn't log missing-directory errors.
+      - ./monitoring/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./monitoring/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  prometheus-data:
