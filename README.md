@@ -12,6 +12,9 @@ curl ──► gateway ──► orders ───────────┤
                                        └──► payments
 
 all services ──OTLP/gRPC──► OTel Collector ──OTLP/gRPC──► Jaeger v2 (UI :16686)
+
+cAdvisor (per-container CPU/RAM/network) ─┐
+OTel Collector self-metrics ──────────────┴──► Prometheus (:9090) ──► Grafana (:3000)
 ```
 
 ### What the services mimic
@@ -38,6 +41,9 @@ chain of calls and spans, not real business behaviour.
 | OTel Python SDK / instrumentation | `opentelemetry-sdk` / `opentelemetry-distro` | `1.45.2` / `0.66b2` |
 | Collector | `otel/opentelemetry-collector-contrib` | `0.165.0` |
 | Tracing backend | `cr.jaegertracing.io/jaegertracing/jaeger` | `2.23.0` |
+| Metrics storage | `prom/prometheus` | `v3.16.0` |
+| Container metrics | `ghcr.io/google/cadvisor` | `v0.60.6` |
+| Dashboards | `grafana/grafana` | `13.3.1` |
 
 Services are a separate uv project (`services/pyproject.toml`). Their full
 dependency tree, including transitive packages and hashes, is locked in
@@ -47,9 +53,13 @@ dependency tree, including transitive packages and hashes, is locked in
 ## Requirements
 
 - Docker with Compose v2
-- Python 3.10+ on the host (only for the stdlib verification script)
+- Python 3.10+ on the host (only for the stdlib verification scripts)
 - [uv](https://docs.astral.sh/uv/) `0.12.x`, only for local development and IDE support
-- Free host ports `8080` (gateway) and `16686` (Jaeger UI)
+- Free host ports `8080` (gateway), `16686` (Jaeger UI), `9090` (Prometheus) and
+  `3000` (Grafana)
+- If your Docker daemon uses a non-default `data-root` (check with
+  `docker info --format '{{.DockerRootDir}}'`), put it in a `.env` file so
+  cAdvisor can read it, e.g. `DOCKER_DATA_ROOT=/mnt/hdd/docker-data`.
 
 ## Run
 
@@ -60,8 +70,15 @@ docker compose up -d --build
 The first build takes a minute or two. Wait until `docker compose ps` shows all
 services as `healthy`, or use `docker compose up -d --build --wait`.
 
+| UI | URL |
+|---|---|
+| Jaeger (traces) | <http://localhost:16686> |
+| Grafana (resource dashboard) | <http://localhost:3000> |
+| Prometheus (raw metrics, targets) | <http://localhost:9090> |
+
 Stop and remove everything with `docker compose down`. Jaeger uses in-memory
-storage, so this also deletes all traces.
+storage, so this deletes all traces. Prometheus data is kept in the
+`prometheus-data` volume; `docker compose down -v` deletes it too.
 
 ## Verify
 
@@ -100,6 +117,28 @@ trace fb7324c4...: 19 spans, 4 services
   [PASS] every non-root span has its parent inside the trace
 ```
 
+```bash
+python3 scripts/verify_monitoring.py
+```
+
+This script checks the metrics pipeline. It sends 50 requests and verifies, via
+the Prometheus API, that all scrape targets are up and that cAdvisor reports CPU,
+memory and network for every container. It also checks that the collector
+accepted, and sent to Jaeger, exactly 50 × 19 spans:
+
+```
+  [PASS] scrape target up: cadvisor
+  ...
+  [PASS] cAdvisor CPU series for all 10 services
+  [PASS] cAdvisor memory series for all 10 services
+  [PASS] cAdvisor network series for all 10 services
+  [PASS] collector network RX > 0 (4649 B/s)
+  [PASS] collector accepted 950 spans == 950 expected
+  [PASS] collector sent 950 spans to Jaeger == 950 expected
+```
+
+Both scripts assume 100% sampling and no other traffic while they run.
+
 ### Manual
 
 ```bash
@@ -121,6 +160,32 @@ Then open the Jaeger UI at <http://localhost:16686>:
 
 Context propagates between services through the W3C `traceparent` header, which
 the httpx and FastAPI instrumentations inject and extract automatically.
+
+## Monitoring
+
+Open Grafana at <http://localhost:3000>. The **tracing-tax** dashboard is the
+home page and refreshes every 5 s. Anonymous users can view it. Log in as
+`admin` / `admin` to edit it or use *Explore*. The dashboard is provisioned from
+`monitoring/grafana/dashboards/tracing-tax.json`, so edits made in the UI are
+not saved. Change the JSON file instead.
+
+| Row | Panels | Source |
+|---|---|---|
+| Containers | CPU (100% = one core), memory working set, network RX/TX per compose service | cAdvisor |
+| OTel Collector | Network into/out of the collector, spans accepted / refused / sent / failed, exporter queue | cAdvisor + collector self-metrics |
+
+Use the *Service* dropdown to filter the container panels. Useful metrics for
+your own queries in Prometheus:
+
+| Metric | Meaning |
+|---|---|
+| `container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`, `container_network_{receive,transmit}_bytes_total` | per container; filter by `container_label_com_docker_compose_service` |
+| `otelcol_receiver_accepted_spans{job="otel-collector"}` | spans the collector received from the services |
+| `otelcol_exporter_sent_spans{job="otel-collector"}` | spans successfully written to Jaeger (= stored spans) |
+
+Prometheus scrapes every 5 s. cAdvisor only collects CPU, memory and network
+metrics (`--enable_metrics`) with a 5 s housekeeping interval, to keep its own
+overhead low.
 
 ## Configuration
 
@@ -184,7 +249,12 @@ services/
   payments/app.py      # POST /payments, simulated work
 collector/configs/     # one OTel Collector config per scenario
 jaeger/config.yaml     # Jaeger v2 config (OTLP in, in-memory storage, UI)
-scripts/verify_trace.py
+monitoring/
+  prometheus.yml       # scrape targets: cAdvisor, collector
+  grafana/provisioning/  # Prometheus datasource + dashboard provider
+  grafana/dashboards/    # tracing-tax.json dashboard
+scripts/verify_trace.py       # end-to-end trace check
+scripts/verify_monitoring.py  # metrics pipeline check
 docker-compose.yml
 pyproject.toml         # uv project (non-package) for host-side tooling
 ```
@@ -199,9 +269,25 @@ pyproject.toml         # uv project (non-package) for host-side tooling
 - Only traces are exported (`OTEL_METRICS_EXPORTER=none`, `OTEL_LOGS_EXPORTER=none`),
   so measured overhead comes from tracing alone. `/health` is excluded from tracing.
 - All services, Redis and the collector share the same limits (`cpus: 1.0`,
-  `mem_limit: 512m`), defined once in `docker-compose.yml`.
+  `mem_limit: 512m`), defined once in `docker-compose.yml`. Monitoring containers
+  have their own, separate limits.
+- Jaeger's self-tracing is disabled (`OTEL_TRACES_SAMPLER=always_off` on the
+  Jaeger container). Otherwise every query to the Jaeger API would store extra
+  `jaeger` spans next to the services' traces.
+- The compose project name is fixed (`name: tracing-tax`), so metric labels don't
+  depend on the directory the repo is cloned into.
+- When reading span counters after traffic, wait about 10 s: the Python SDK
+  exports spans every 5 s (`OTEL_BSP_SCHEDULE_DELAY`) and Prometheus scrapes every
+  5 s. Right after restarting the whole stack, Prometheus may still return the
+  previous run's last counter value for a few minutes. Use only recent samples,
+  e.g. `last_over_time(...[10s])`, as `scripts/verify_monitoring.py` does.
 - Redis runs purely in memory (no RDB/AOF persistence), so disk I/O doesn't add
   noise to the measurements.
+- Service healthchecks use a bash `/dev/tcp` probe instead of starting Python.
+  Healthchecks run inside the measured containers, so their CPU counts against
+  the services: a Python probe cost ~350 ms CPU, about 7% of a core at a 5 s
+  interval, while the bash probe costs ~4 ms. Probes run every second during
+  startup, then every 30 s.
 - The `inventory` health check does not ping Redis. Excluding `/health` from
   tracing only drops the HTTP span, so a Redis `PING` would still create a
   standalone trace on every probe.

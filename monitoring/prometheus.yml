@@ -1,0 +1,17 @@
+# Short interval: experiment runs are only a few minutes long.
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Per-container CPU, memory and network (all services, collector, Jaeger).
+  - job_name: cadvisor
+    static_configs:
+      - targets: ["cadvisor:8080"]
+
+  # Collector self-metrics: spans accepted / refused / sent / failed, queue size.
+  # "Sent" spans are the ones successfully written to Jaeger, so Jaeger's own
+  # metrics would only duplicate them.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
