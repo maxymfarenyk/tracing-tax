@@ -286,6 +286,11 @@ pyproject.toml         # uv project (non-package) for host-side tooling
   e.g. `last_over_time(...[10s])`, as `scripts/verify_monitoring.py` does.
 - Redis runs purely in memory (no RDB/AOF persistence), so disk I/O doesn't add
   noise to the measurements.
+- Service healthchecks use a bash `/dev/tcp` probe instead of starting Python.
+  Healthchecks run inside the measured containers, so their CPU counts against
+  the services: a Python probe cost ~350 ms CPU, about 7% of a core at a 5 s
+  interval, while the bash probe costs ~4 ms. Probes run every second during
+  startup, then every 30 s.
 - The `inventory` health check does not ping Redis. Excluding `/health` from
   tracing only drops the HTTP span, so a Redis `PING` would still create a
   standalone trace on every probe.

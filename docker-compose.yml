@@ -30,11 +30,21 @@ x-otel-env: &otel-env
   # Keep health-check probes out of the traces.
   OTEL_PYTHON_EXCLUDED_URLS: health
 
+# Healthchecks run inside the measured containers, so their CPU counts against
+# the services. Starting a Python interpreter per probe cost ~350 ms CPU (~7% of
+# a core at a 5 s interval); this bash /dev/tcp probe costs ~4 ms. Probes run
+# every second during startup (fast `up --wait`), then only every 30 s.
 x-py-healthcheck: &py-healthcheck
-  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
-  interval: 5s
+  test:
+    - CMD
+    - bash
+    - -c
+    - 'exec 3<>/dev/tcp/127.0.0.1/8000 && printf "GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n" >&3 && head -1 <&3 | grep -q " 200 "'
+  interval: 30s
   timeout: 3s
-  retries: 10
+  retries: 3
+  start_period: 30s
+  start_interval: 1s
 
 services:
   gateway:
@@ -128,9 +138,11 @@ services:
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 30s
       timeout: 3s
-      retries: 10
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.165.0
