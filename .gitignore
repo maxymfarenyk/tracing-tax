@@ -12,3 +12,6 @@ CLAUDE.md
 .env
 .env.*
 
+
+# Ad-hoc Locust runs (final results go to results/raw/)
+results/load/
