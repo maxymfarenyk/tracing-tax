@@ -8,6 +8,7 @@ dependencies = [
     "fastapi==0.163.1",
     "uvicorn==0.54.0",
     "httpx==0.28.1",
+    "redis==8.1.0",
     # OpenTelemetry zero-code instrumentation. Instrumentation packages are
     # pinned explicitly instead of using `opentelemetry-bootstrap -a install`,
     # which resolves versions at build time.
@@ -15,6 +16,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc==1.45.2",
     "opentelemetry-instrumentation-fastapi==0.66b2",
     "opentelemetry-instrumentation-httpx==0.66b2",
+    "opentelemetry-instrumentation-redis==0.66b2",
 ]
 
 [tool.uv]

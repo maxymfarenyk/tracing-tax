@@ -1,5 +1,6 @@
-# Iteration 1: gateway -> orders, traced via OTel zero-code instrumentation,
-# exported to an OTel Collector, stored and visualised in Jaeger v2.
+# gateway -> orders -> inventory (Redis) / payments, traced via OTel zero-code
+# instrumentation, exported to an OTel Collector, stored and visualised in
+# Jaeger v2.
 
 # Resource limits must be identical across all experiment scenarios.
 x-service-limits: &service-limits
@@ -19,13 +20,19 @@ x-otel-env: &otel-env
   # Keep health-check probes out of the traces.
   OTEL_PYTHON_EXCLUDED_URLS: health
 
+x-py-healthcheck: &py-healthcheck
+  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+  interval: 5s
+  timeout: 3s
+  retries: 10
+
 services:
   gateway:
     build:
       context: ./services
       args:
         SERVICE: gateway
-    image: tracing-tax/gateway:iter1
+    image: tracing-tax/gateway:dev
     <<: *service-limits
     environment:
       <<: *otel-env
@@ -40,29 +47,80 @@ services:
         condition: service_healthy
       otel-collector:
         condition: service_started
-    healthcheck: &py-healthcheck
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    healthcheck: *py-healthcheck
 
   orders:
     build:
       context: ./services
       args:
         SERVICE: orders
-    image: tracing-tax/orders:iter1
+    image: tracing-tax/orders:dev
     <<: *service-limits
     environment:
       <<: *otel-env
       OTEL_SERVICE_NAME: orders
+      INVENTORY_URL: http://inventory:8000
+      PAYMENTS_URL: http://payments:8000
       WORK_MS: ${ORDERS_WORK_MS:-20}
       ERROR_RATE: ${ORDERS_ERROR_RATE:-0}
       SLOW_RATE: ${ORDERS_SLOW_RATE:-0}
     depends_on:
+      inventory:
+        condition: service_healthy
+      payments:
+        condition: service_healthy
       otel-collector:
         condition: service_started
     healthcheck: *py-healthcheck
+
+  payments:
+    build:
+      context: ./services
+      args:
+        SERVICE: payments
+    image: tracing-tax/payments:dev
+    <<: *service-limits
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: payments
+      WORK_MS: ${PAYMENTS_WORK_MS:-30}
+      ERROR_RATE: ${PAYMENTS_ERROR_RATE:-0}
+      SLOW_RATE: ${PAYMENTS_SLOW_RATE:-0}
+    depends_on:
+      otel-collector:
+        condition: service_started
+    healthcheck: *py-healthcheck
+
+  inventory:
+    build:
+      context: ./services
+      args:
+        SERVICE: inventory
+    image: tracing-tax/inventory:dev
+    <<: *service-limits
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: inventory
+      REDIS_URL: redis://redis:6379/0
+      ERROR_RATE: ${INVENTORY_ERROR_RATE:-0}
+      SLOW_RATE: ${INVENTORY_SLOW_RATE:-0}
+    depends_on:
+      redis:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+    healthcheck: *py-healthcheck
+
+  redis:
+    image: redis:8.10.3-alpine3.23
+    <<: *service-limits
+    # Pure in-memory: no RDB snapshots or AOF, so disk I/O does not add noise.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.165.0
