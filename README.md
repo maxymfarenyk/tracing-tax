@@ -3,18 +3,38 @@
 Research stand for the coursework *"Optimizing observability systems: the impact
 of trace sampling strategies on microservice architecture load"*.
 
-**Iteration 1** sets up a minimal end-to-end tracing pipeline:
+The stand is a small chain of FastAPI services, traced with OpenTelemetry
+zero-code instrumentation:
 
 ```
-curl ──► gateway ──HTTP──► orders
-           │                 │
-           └──── OTLP/gRPC ──┴──► OTel Collector ──OTLP/gRPC──► Jaeger v2 (UI :16686)
+                                       ┌──► inventory ──► Redis
+curl ──► gateway ──► orders ───────────┤
+                                       └──► payments
+
+all services ──OTLP/gRPC──► OTel Collector ──OTLP/gRPC──► Jaeger v2 (UI :16686)
 ```
+
+### What the services mimic
+
+A checkout in an online shop: one request places an order for 1 book and 2 pens.
+The logic is deliberately minimal. The services exist to produce a realistic
+chain of calls and spans, not real business behaviour.
+
+| Service | In a real shop | Here |
+|---|---|---|
+| `gateway` | Public entry point (auth, routing) | Forwards the request to `orders` |
+| `orders` | Creates the order and coordinates the checkout | 20 ms of "work", then calls `inventory` and `payments`, in that order |
+| `inventory` | Reserves stock so two customers can't buy the last item | Adds the quantities to running counters in Redis (`reserved:book`, `reserved:pen`); no stock limits |
+| `payments` | Charges the card through a payment provider | Waits 30 ms (the "bank call") and returns a random payment ID |
+| `redis` | Inventory database | In-memory counters, no persistence |
+
+### Pinned versions
 
 | Component | Image / package | Version |
 |---|---|---|
 | Services runtime | `python` | `3.14.10-slim-trixie` |
 | Web framework | `fastapi` / `uvicorn` / `httpx` | `0.163.1` / `0.54.0` / `0.28.1` |
+| Redis / client | `redis` image / `redis` (redis-py) | `8.10.3-alpine3.23` / `8.1.0` |
 | OTel Python SDK / instrumentation | `opentelemetry-sdk` / `opentelemetry-distro` | `1.45.2` / `0.66b2` |
 | Collector | `otel/opentelemetry-collector-contrib` | `0.165.0` |
 | Tracing backend | `cr.jaegertracing.io/jaegertracing/jaeger` | `2.23.0` |
@@ -37,8 +57,8 @@ dependency tree, including transitive packages and hashes, is locked in
 docker compose up -d --build
 ```
 
-The first build takes a minute or two. Wait until `docker compose ps` shows the
-`gateway` and `orders` services as `healthy`, or use `docker compose up -d --build --wait`.
+The first build takes a minute or two. Wait until `docker compose ps` shows all
+services as `healthy`, or use `docker compose up -d --build --wait`.
 
 Stop and remove everything with `docker compose down`. Jaeger uses in-memory
 storage, so this also deletes all traces.
@@ -52,20 +72,31 @@ python3 scripts/verify_trace.py
 ```
 
 The script sends one request to the gateway and finds its trace through the
-Jaeger query API (`/api/v3`). It then checks that the trace contains spans from
-both services with correct parent-child links, and prints a direct link to the
-trace in the UI. Expected output:
+Jaeger query API (`/api/v3`). It prints the span tree, checks that every
+service-to-service call and every Redis command is linked correctly, and prints a
+direct link to the trace in the UI. Expected output (`http send/receive`
+INTERNAL spans omitted here):
 
 ```
-trace 77ba757c...: 7 spans
-  gateway  SERVER   GET /order/{order_id}                 26.5 ms  parent=<root>
-  gateway  CLIENT   GET                                   24.1 ms  parent=gateway:GET /order/{order_id}
-  orders   SERVER   GET /orders/{order_id}                21.3 ms  parent=gateway:GET
-  orders   INTERNAL GET /orders/{order_id} http send       0.0 ms  parent=orders:GET /orders/{order_id}
+trace fb7324c4...: 19 spans, 4 services
+
+  gateway: GET /order/{order_id}                       SERVER      65.6 ms
+    gateway: GET                                       CLIENT      63.8 ms
+      orders: GET /orders/{order_id}                   SERVER      61.0 ms
+        orders: POST                                   CLIENT       4.1 ms
+          inventory: POST /reservations                SERVER       1.6 ms
+            inventory: INCRBY                          CLIENT       0.3 ms
+            inventory: INCRBY                          CLIENT       0.2 ms
+        orders: POST                                   CLIENT      33.7 ms
+          payments: POST /payments                     SERVER      31.1 ms
+
+  [PASS] gateway: exactly one SERVER span
   ...
-  [PASS] gateway SERVER span is the trace root
-  [PASS] gateway CLIENT span is a child of gateway SERVER span
-  [PASS] orders SERVER span is a child of gateway CLIENT span
+  [PASS] single root span: gateway SERVER
+  [PASS] orders SERVER <- gateway CLIENT <- gateway SERVER
+  [PASS] inventory SERVER <- orders CLIENT <- orders SERVER
+  [PASS] payments SERVER <- orders CLIENT <- orders SERVER
+  [PASS] 2 redis CLIENT spans, children of inventory SERVER
   [PASS] every non-root span has its parent inside the trace
 ```
 
@@ -78,14 +109,15 @@ curl -i http://localhost:8080/order/42
 Then open the Jaeger UI at <http://localhost:16686>:
 
 1. **Search** tab → *Service*: `gateway` → *Find Traces*.
-2. Open the newest trace `gateway: GET /order/{order_id}`. It shows 2 services and
-   7 spans:
+2. Open the newest trace `gateway: GET /order/{order_id}`. It shows 4 services and
+   19 spans:
    - `gateway  GET /order/{order_id}`: root SERVER span (FastAPI)
      - `gateway  GET`: CLIENT span of the outgoing httpx call
-       - `orders  GET /orders/{order_id}`: SERVER span in `orders` (≈ `WORK_MS`)
-         - 2 × `http send`: ASGI internal spans
-     - 2 × `http send`: ASGI internal spans
-3. The **Trace Graph** view (top-right dropdown) shows the `gateway → orders` call.
+       - `orders  GET /orders/{order_id}`: SERVER span
+         - `orders  POST` → `inventory  POST /reservations` → 2 × `INCRBY` (Redis)
+         - `orders  POST` → `payments  POST /payments`
+   - Each service also adds 2–3 ASGI INTERNAL spans (`http send` / `http receive`).
+3. The **Trace Graph** view (top-right dropdown) shows the whole call graph.
 
 Context propagates between services through the W3C `traceparent` header, which
 the httpx and FastAPI instrumentations inject and extract automatically.
@@ -114,13 +146,23 @@ OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.1 docker 
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GATEWAY_ERROR_RATE`, `ORDERS_ERROR_RATE` | `0` | Probability (0..1) of answering HTTP 500 |
-| `GATEWAY_SLOW_RATE`, `ORDERS_SLOW_RATE` | `0` | Probability (0..1) of adding extra delay |
-| `ORDERS_WORK_MS` | `20` | Baseline simulated work in `orders` |
+Each service has its own variables, prefixed with its name (`GATEWAY_`, `ORDERS_`,
+`INVENTORY_`, `PAYMENTS_`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `<SERVICE>_ERROR_RATE` | `0` | Probability (0..1) of answering HTTP 500 |
+| `<SERVICE>_SLOW_RATE` | `0` | Probability (0..1) of adding extra delay |
+| `ORDERS_WORK_MS` | `20` | Simulated work in `orders` |
+| `PAYMENTS_WORK_MS` | `30` | Simulated payment provider call in `payments` |
 
 Inside the containers these map to `ERROR_RATE`, `SLOW_RATE`, `SLOW_DELAY_MS`
-(default 500) and `WORK_MS` (see `services/common/faults.py`). When `orders`
-fails, `gateway` returns `502`. Both server spans then get status `ERROR`.
+(default 500) and `WORK_MS` (see `services/common/faults.py`).
+
+A failure anywhere downstream propagates up: the failing service answers `500`,
+and every caller above it answers `502` (`services/common/downstream.py`). All
+server spans on that path get status `ERROR`. A slow request only adds latency
+and does not change the span status.
 
 ### Collector config
 
@@ -135,8 +177,11 @@ services/
   pyproject.toml       # uv project for the services: direct deps, pinned
   uv.lock              # full locked dependency tree (used by the image build)
   common/faults.py     # ERROR_RATE / SLOW_RATE fault injection
+  common/downstream.py # HTTP calls to other services, failures -> 502
   gateway/app.py       # GET /order/{id} -> orders
-  orders/app.py        # GET /orders/{id}, simulated work
+  orders/app.py        # GET /orders/{id} -> inventory, payments
+  inventory/app.py     # POST /reservations, INCRBY per item in Redis
+  payments/app.py      # POST /payments, simulated work
 collector/configs/     # one OTel Collector config per scenario
 jaeger/config.yaml     # Jaeger v2 config (OTLP in, in-memory storage, UI)
 scripts/verify_trace.py
@@ -153,8 +198,13 @@ pyproject.toml         # uv project (non-package) for host-side tooling
   build time.
 - Only traces are exported (`OTEL_METRICS_EXPORTER=none`, `OTEL_LOGS_EXPORTER=none`),
   so measured overhead comes from tracing alone. `/health` is excluded from tracing.
-- `gateway`, `orders` and the collector share the same limits (`cpus: 1.0`,
+- All services, Redis and the collector share the same limits (`cpus: 1.0`,
   `mem_limit: 512m`), defined once in `docker-compose.yml`.
+- Redis runs purely in memory (no RDB/AOF persistence), so disk I/O doesn't add
+  noise to the measurements.
+- The `inventory` health check does not ping Redis. Excluding `/health` from
+  tracing only drops the HTTP span, so a Redis `PING` would still create a
+  standalone trace on every probe.
 - Service dependencies and host tooling are separate uv projects with separate
   locks, so upgrading analysis or load tools can never change what runs inside
   the measured services.
@@ -175,7 +225,7 @@ There are two independent Python environments:
    window as a second module. Set its interpreter to `services/.venv`
    (*Add Interpreter → Existing → services/.venv/bin/python*).
 3. Right-click `services/common` and choose *Mark Directory as → Sources Root*,
-   so that `from faults import ...` resolves. In the image, `common/` and the
+   so that `from faults import ...` and `import downstream` resolve. In the image, `common/` and the
    service folder are copied into the same directory.
 
 **VS Code**: select `services/.venv/bin/python` as the interpreter when you
