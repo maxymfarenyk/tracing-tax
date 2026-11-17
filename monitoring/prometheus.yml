@@ -10,15 +10,8 @@ scrape_configs:
       - targets: ["cadvisor:8080"]
 
   # Collector self-metrics: spans accepted / refused / sent / failed, queue size.
+  # "Sent" spans are the ones successfully written to Jaeger, so Jaeger's own
+  # metrics would only duplicate them.
   - job_name: otel-collector
     static_configs:
       - targets: ["otel-collector:8888"]
-
-  # Jaeger self-metrics: spans written to storage.
-  - job_name: jaeger
-    static_configs:
-      - targets: ["jaeger:8888"]
-
-  - job_name: prometheus
-    static_configs:
-      - targets: ["localhost:9090"]

@@ -157,9 +157,9 @@ services:
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.23.0
     command: ["--config=/etc/jaeger/config.yaml"]
     environment:
-      # Jaeger traces its own query API by default and stores those spans too,
-      # which would inflate the "spans stored" metric every time a script
-      # queries Jaeger. Its internal tracer honours standard OTel SDK env vars.
+      # Jaeger traces its own query API by default and stores those spans next
+      # to the services' traces, so every script querying Jaeger would add
+      # spans to storage. Its internal tracer honours standard OTel SDK env vars.
       OTEL_TRACES_SAMPLER: always_off
     volumes:
       - ./jaeger/config.yaml:/etc/jaeger/config.yaml:ro

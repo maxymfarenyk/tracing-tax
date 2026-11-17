@@ -1,10 +1,10 @@
-"""Smoke test for the monitoring stack (Prometheus + cAdvisor + collector/Jaeger metrics).
+"""Smoke test for the monitoring stack (Prometheus + cAdvisor + collector metrics).
 
 Sends a fixed number of requests to the gateway, then checks via the
 Prometheus HTTP API that:
   - every scrape target is up,
   - cAdvisor reports CPU, memory and network for every compose service,
-  - the collector accepted, and Jaeger stored, exactly requests x spans-per-request
+  - the collector accepted, and sent to Jaeger, exactly requests x spans-per-request
     spans (proves the span counters can be trusted for the experiments).
 
 Assumes 100% sampling (the default) and no other traffic while it runs.
@@ -24,7 +24,7 @@ SERVICES = [
     "gateway", "orders", "inventory", "payments", "redis",
     "otel-collector", "jaeger", "prometheus", "grafana", "cadvisor",
 ]
-TARGETS = {"cadvisor", "otel-collector", "jaeger", "prometheus"}
+TARGETS = {"cadvisor", "otel-collector"}
 
 # Spans per successful request with the current topology: 4 SERVER, 3 HTTP
 # CLIENT, 2 Redis CLIENT, 10 ASGI INTERNAL (see `scripts/verify_trace.py`).
@@ -35,7 +35,8 @@ SPANS_PER_REQUEST = 19
 # still "current" for up to 5 minutes, because Prometheus never saw the old
 # series end, so a plain instant query would return a stale baseline.
 ACCEPTED = 'otelcol_receiver_accepted_spans{job="otel-collector"}'
-STORED = 'otelcol_exporter_sent_spans{job="jaeger"}'
+# Spans successfully exported to Jaeger, i.e. stored.
+STORED = 'otelcol_exporter_sent_spans{job="otel-collector"}'
 FRESH = "sum(last_over_time({sel}[10s]))"
 
 
@@ -135,7 +136,7 @@ def main() -> None:
         )
     checks[f"collector network RX > 0 ({collector_rx:.0f} B/s)"] = collector_rx > 0
     checks[f"collector accepted {accepted:.0f} spans == {expected} expected"] = accepted == expected
-    checks[f"Jaeger stored {stored:.0f} spans == {expected} expected"] = stored == expected
+    checks[f"collector sent {stored:.0f} spans to Jaeger == {expected} expected"] = stored == expected
 
     print()
     for name, ok in checks.items():

@@ -14,8 +14,7 @@ curl ──► gateway ──► orders ───────────┤
 all services ──OTLP/gRPC──► OTel Collector ──OTLP/gRPC──► Jaeger v2 (UI :16686)
 
 cAdvisor (per-container CPU/RAM/network) ─┐
-OTel Collector self-metrics ──────────────┼──► Prometheus (:9090) ──► Grafana (:3000)
-Jaeger self-metrics (spans stored) ───────┘
+OTel Collector self-metrics ──────────────┴──► Prometheus (:9090) ──► Grafana (:3000)
 ```
 
 ### What the services mimic
@@ -125,7 +124,7 @@ python3 scripts/verify_monitoring.py
 This script checks the metrics pipeline. It sends 50 requests and verifies, via
 the Prometheus API, that all scrape targets are up and that cAdvisor reports CPU,
 memory and network for every container. It also checks that the collector
-accepted, and Jaeger stored, exactly 50 × 19 spans:
+accepted, and sent to Jaeger, exactly 50 × 19 spans:
 
 ```
   [PASS] scrape target up: cadvisor
@@ -135,7 +134,7 @@ accepted, and Jaeger stored, exactly 50 × 19 spans:
   [PASS] cAdvisor network series for all 10 services
   [PASS] collector network RX > 0 (4649 B/s)
   [PASS] collector accepted 950 spans == 950 expected
-  [PASS] Jaeger stored 950 spans == 950 expected
+  [PASS] collector sent 950 spans to Jaeger == 950 expected
 ```
 
 Both scripts assume 100% sampling and no other traffic while they run.
@@ -174,7 +173,6 @@ not saved. Change the JSON file instead.
 |---|---|---|
 | Containers | CPU (100% = one core), memory working set, network RX/TX per compose service | cAdvisor |
 | OTel Collector | Network into/out of the collector, spans accepted / refused / sent / failed, exporter queue | cAdvisor + collector self-metrics |
-| Jaeger | Spans stored per second and over the selected range | Jaeger self-metrics |
 
 Use the *Service* dropdown to filter the container panels. Useful metrics for
 your own queries in Prometheus:
@@ -183,8 +181,7 @@ your own queries in Prometheus:
 |---|---|
 | `container_cpu_usage_seconds_total`, `container_memory_working_set_bytes`, `container_network_{receive,transmit}_bytes_total` | per container; filter by `container_label_com_docker_compose_service` |
 | `otelcol_receiver_accepted_spans{job="otel-collector"}` | spans the collector received from the services |
-| `otelcol_exporter_sent_spans{job="otel-collector"}` | spans the collector forwarded to Jaeger |
-| `otelcol_exporter_sent_spans{job="jaeger"}` | spans written to Jaeger storage |
+| `otelcol_exporter_sent_spans{job="otel-collector"}` | spans successfully written to Jaeger (= stored spans) |
 
 Prometheus scrapes every 5 s. cAdvisor only collects CPU, memory and network
 metrics (`--enable_metrics`) with a 5 s housekeeping interval, to keep its own
@@ -253,7 +250,7 @@ services/
 collector/configs/     # one OTel Collector config per scenario
 jaeger/config.yaml     # Jaeger v2 config (OTLP in, in-memory storage, UI)
 monitoring/
-  prometheus.yml       # scrape targets: cAdvisor, collector, Jaeger
+  prometheus.yml       # scrape targets: cAdvisor, collector
   grafana/provisioning/  # Prometheus datasource + dashboard provider
   grafana/dashboards/    # tracing-tax.json dashboard
 scripts/verify_trace.py       # end-to-end trace check
@@ -276,7 +273,7 @@ pyproject.toml         # uv project (non-package) for host-side tooling
   have their own, separate limits.
 - Jaeger's self-tracing is disabled (`OTEL_TRACES_SAMPLER=always_off` on the
   Jaeger container). Otherwise every query to the Jaeger API would store extra
-  `jaeger` spans and inflate the "spans stored" metric.
+  `jaeger` spans next to the services' traces.
 - The compose project name is fixed (`name: tracing-tax`), so metric labels don't
   depend on the directory the repo is cloned into.
 - When reading span counters after traffic, wait about 10 s: the Python SDK
