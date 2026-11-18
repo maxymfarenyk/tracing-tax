@@ -11,6 +11,8 @@ in Jaeger (Prometheus counter, before/after delta) with N x ratio:
                                      (services export 100%), stores ~10%:
                                      without faults only the probabilistic
                                      policy of collector/configs/tail.yaml fires
+    E (adaptive)                  -> every trace: sequential requests stay
+                                     below the cap (OTEL_TRACES_SAMPLER_ARG)
 
 Deltas are used because Jaeger's in-memory store keeps traces from earlier
 scenarios until it restarts. Run it with the stack started from the same file:
@@ -54,6 +56,9 @@ def expected_ratio(env: dict[str, str]) -> float:
         return 0.0
     if sampler in ("traceidratio", "parentbased_traceidratio"):
         return float(env.get("OTEL_TRACES_SAMPLER_ARG", "1.0"))
+    if sampler == "adaptive":
+        # Requests are sent one at a time (<= ~10/s), below the cap.
+        return 1.0
     sys.exit(f"FAIL: don't know the expected ratio of sampler {sampler!r}")
 
 

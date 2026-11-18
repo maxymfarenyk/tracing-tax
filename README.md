@@ -237,6 +237,7 @@ them needs no code changes and no rebuild.
 | B | `scenarios/B.env` | `always_on` | head-based 100%: full tracing overhead |
 | C | `scenarios/C.env` | `parentbased_traceidratio`, `0.1` | head-based 10%: overhead when ~90% of traces are dropped at the source |
 | D | `scenarios/D.env` | `always_on` + collector `tail_sampling` (`COLLECTOR_CONFIG=tail`) | tail-based: services still export 100%, the collector keeps errors, slow traces (> 500 ms) and 10% of the rest; costs collector memory for buffering |
+| E | `scenarios/E.env` | `adaptive`, `15` (cap, traces/s) | adaptive head-based: keeps every trace below the cap, ~15 traces/s above it (see [Adaptive sampler](#adaptive-sampler-scenario-e)) |
 
 Start (or switch to) a scenario:
 
@@ -274,8 +275,8 @@ machinery as possible without a different image.
 python3 scripts/verify_sampling.py scenarios/C.env
 ```
 
-The script reads the expected ratio from the file (A: 0, B: 1, C: 0.1, D: 0.1)
-and sends 500 requests. It then compares how many spans the collector stored in Jaeger
+The script reads the expected ratio from the file (A: 0, B: 1, C: 0.1, D: 0.1,
+E: 1) and sends 500 requests. It then compares how many spans the collector stored in Jaeger
 (the Prometheus counter delta, so traces from earlier scenarios don't count)
 with the expected share. The result must be within 3σ of a binomial, and every
 trace must be complete (a multiple of 19 spans, because ParentBased keeps or drops a trace
@@ -303,6 +304,10 @@ scenario D: expected ratio 0.1 (tail sampling)
   [PASS] ratio 0.118 within 0.1 ± 0.040
   [PASS] services exported every span (9500 accepted = 9500)
 ```
+
+For E the script expects every trace: it sends requests one at a time
+(at most ~10/s), which is below the cap. That the cap holds at high load is
+checked by the experiment itself (`traces_kept / requests` ≈ 0.5 at 30 RPS).
 
 ## Experiment
 
@@ -375,19 +380,42 @@ All knobs are environment variables read by `docker-compose.yml`. Pass them on t
 command line, e.g. `ORDERS_ERROR_RATE=0.1 docker compose up -d`, or put them in a
 `.env` file (which git ignores).
 
-### Sampling (standard OTel SDK env vars only; there is no sampling code)
+### Sampling (standard OTel SDK env vars)
 
 Normally set through a scenario file (see [Scenarios](#scenarios)).
 
 | Variable | Default | Examples |
 |---|---|---|
-| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | `always_on`, `always_off`, `parentbased_traceidratio` |
-| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | `0.1`, `0.01` (ratio for `*traceidratio`) |
+| `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | `always_on`, `always_off`, `parentbased_traceidratio`, `adaptive` |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | `0.1`, `0.01` (ratio for `*traceidratio`), `15` (cap in traces/s for `adaptive`) |
 | `OTEL_SDK_DISABLED` | `false` | `true` (scenario A) |
 | `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` | empty | `*` (scenario A), `redis` |
 | `OTEL_TRACES_EXPORTER` | `otlp` | `none` (scenario A) |
 
 `scripts/verify_trace.py` and `scripts/verify_monitoring.py` assume 100% sampling (B).
+
+### Adaptive sampler (scenario E)
+
+The only sampling code in the repo, `services/adaptive_sampler/`, is a small
+package installed into the services' image. It registers `adaptive` in the
+SDK's `opentelemetry_traces_sampler` entry point group, so it is selected like
+a built-in sampler, through `OTEL_TRACES_SAMPLER` / `OTEL_TRACES_SAMPLER_ARG`.
+
+- The gateway counts new traces in tumbling 5 s windows. At the end of each
+  window it sets the keep probability for the next one to
+  `min(1, cap / rate)`, where `rate` is the measured traces/s.
+- Below the cap every trace is kept. Above it about `cap` traces/s are kept.
+  The first window, and the window after an idle gap, keep everything.
+- Whether a trace is kept is decided from its trace ID, the same way as
+  `TraceIdRatioBased`. The sampler is wrapped in `ParentBased`, so the
+  downstream services follow the gateway's decision and traces stay whole.
+- It lags traffic changes by one window (5 s); the 30 s warm-up covers that.
+
+Unit tests of the rate logic (stdlib `unittest`, fake clock):
+
+```bash
+cd services && uv run python -m unittest discover -s adaptive_sampler/tests -v
+```
 
 ### Fault injection
 
@@ -417,7 +445,7 @@ Each scenario file sets it:
 
 | Config | Used by | Pipeline |
 |---|---|---|
-| `passthrough` | A, B, C | `otlp` -> `batch` -> Jaeger: forwards every span it receives |
+| `passthrough` | A, B, C, E | `otlp` -> `batch` -> Jaeger: forwards every span it receives |
 | `tail` | D | `otlp` -> `tail_sampling` -> `batch` -> Jaeger |
 
 `tail.yaml` buffers each trace for `decision_wait: 10s` (more than the SDK's
@@ -446,6 +474,7 @@ services/
   orders/app.py        # GET /orders/{id} -> inventory, payments
   inventory/app.py     # POST /reservations, INCRBY per item in Redis
   payments/app.py      # POST /payments, simulated work
+  adaptive_sampler/    # scenario E sampler package (+ unit tests)
 collector/configs/     # one OTel Collector config per scenario
 jaeger/config.yaml     # Jaeger v2 config (OTLP in, in-memory storage, UI)
 monitoring/
@@ -456,7 +485,7 @@ scripts/verify_trace.py       # end-to-end trace check
 scripts/verify_monitoring.py  # metrics pipeline check
 scripts/verify_sampling.py    # scenario sampling ratio check
 scripts/run_experiment.py     # scenarios x load levels x repetitions -> CSV
-scenarios/             # one env file per experiment scenario (A, B, C, D)
+scenarios/             # one env file per experiment scenario (A-E)
 scenarios/faults.env   # fault injection shared by all experiment runs
 load/locustfile.py     # steady load: 1 request/s per user, per-request log
 results/raw/           # experiment CSVs (raw/locust/ = per-run request logs, gitignored)

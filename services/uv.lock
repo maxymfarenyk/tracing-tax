@@ -455,6 +455,17 @@ wheels = [
 ]
 
 [[package]]
+name = "tracing-tax-adaptive-sampler"
+version = "0.1.0"
+source = { directory = "adaptive_sampler" }
+dependencies = [
+    { name = "opentelemetry-sdk" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "opentelemetry-sdk", specifier = "==1.45.2" }]
+
+[[package]]
 name = "tracing-tax-services"
 version = "0.1.0"
 source = { virtual = "." }
@@ -467,6 +478,7 @@ dependencies = [
     { name = "opentelemetry-instrumentation-httpx" },
     { name = "opentelemetry-instrumentation-redis" },
     { name = "redis" },
+    { name = "tracing-tax-adaptive-sampler" },
     { name = "uvicorn" },
 ]
 
@@ -480,6 +492,7 @@ requires-dist = [
     { name = "opentelemetry-instrumentation-httpx", specifier = "==0.66b2" },
     { name = "opentelemetry-instrumentation-redis", specifier = "==0.66b2" },
     { name = "redis", specifier = "==8.1.0" },
+    { name = "tracing-tax-adaptive-sampler", directory = "adaptive_sampler" },
     { name = "uvicorn", specifier = "==0.54.0" },
 ]
 
