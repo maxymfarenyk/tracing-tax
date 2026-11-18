@@ -15,3 +15,5 @@ CLAUDE.md
 
 # Ad-hoc Locust runs (final results go to results/raw/)
 results/load/
+# Per-request Locust logs of experiment runs (summarised in results/raw/*.csv)
+results/raw/locust/
