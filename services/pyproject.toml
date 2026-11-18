@@ -17,8 +17,13 @@ dependencies = [
     "opentelemetry-instrumentation-fastapi==0.66b2",
     "opentelemetry-instrumentation-httpx==0.66b2",
     "opentelemetry-instrumentation-redis==0.66b2",
+    # Scenario E's sampler (local package, registers OTEL_TRACES_SAMPLER=adaptive).
+    "tracing-tax-adaptive-sampler",
 ]
 
 [tool.uv]
 # Not an installable package: just a locked environment for the services.
 package = false
+
+[tool.uv.sources]
+tracing-tax-adaptive-sampler = { path = "adaptive_sampler" }

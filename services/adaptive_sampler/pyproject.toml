@@ -1,0 +1,18 @@
+[project]
+name = "tracing-tax-adaptive-sampler"
+version = "0.1.0"
+description = "Adaptive (rate-limited) head sampler for scenario E of the tracing-tax stand"
+requires-python = "==3.14.*"
+dependencies = ["opentelemetry-sdk==1.45.2"]
+
+# The OTel SDK looks up OTEL_TRACES_SAMPLER=adaptive in this entry point group
+# and calls the factory with the raw OTEL_TRACES_SAMPLER_ARG string.
+[project.entry-points.opentelemetry_traces_sampler]
+adaptive = "adaptive_sampler:create_sampler"
+
+[build-system]
+requires = ["uv_build==0.12.23"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "adaptive_sampler"

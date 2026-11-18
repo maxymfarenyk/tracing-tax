@@ -12,8 +12,11 @@ WORKDIR /app
 
 # Install the locked environment into /app/.venv. uv is mounted only for this
 # step, so it is not part of the runtime image. --locked fails the build if
-# uv.lock is out of date with pyproject.toml.
+# uv.lock is out of date with pyproject.toml. The adaptive sampler (scenario E)
+# is a local package installed into the venv, so the SDK finds its
+# `opentelemetry_traces_sampler` entry point.
 COPY pyproject.toml uv.lock .python-version ./
+COPY adaptive_sampler/ ./adaptive_sampler/
 RUN --mount=from=ghcr.io/astral-sh/uv:0.12.23,source=/uv,target=/bin/uv \
     uv sync --locked --no-dev --no-install-project
 
