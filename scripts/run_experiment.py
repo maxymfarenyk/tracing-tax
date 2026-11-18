@@ -5,7 +5,8 @@ Per run:
        every run starts from an empty Jaeger, fresh collector counters and
        fresh processes;
     2. one Locust run: warm-up (stats discarded), then the measured window;
-    3. wait for the last spans and metrics to arrive (drain);
+    3. wait for the last spans and metrics to arrive (drain; longer for
+       tail sampling, whose decisions come `decision_wait` later);
     4. collect the Locust request log, Prometheus metrics (CPU/RAM, bytes into
        the collector, span counters) and the traces kept in Jaeger;
     5. append the row to the CSV.
@@ -40,6 +41,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from verify_monitoring import PROJECT, query
+from verify_sampling import read_env
 from verify_trace import _flatten, _get
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +61,10 @@ CONTAINERS = {s: s for s in SERVICES} | {"redis": "redis", "otel-collector": "co
 # Span counters are read this long after the window, to include spans that
 # were still being exported (SDK batches every 5 s, Prometheus scrapes every 5 s).
 EXPORT_LAG_S = 10
+# With tail sampling the collector holds every trace for `decision_wait` before
+# exporting it, so stored spans lag the accepted ones by that much. Must match
+# collector/configs/tail.yaml.
+TAIL_DECISION_WAIT_S = 10
 # Jaeger is searched in slices of this length; a slice must hold fewer traces
 # than SEARCH_DEPTH, otherwise the count would be silently truncated.
 SLICE_S = 10
@@ -150,7 +156,14 @@ def by_service(prom: str, expr: str, at: float) -> dict[str, float]:
     return {r["metric"].get(label, ""): float(r["value"][1]) for r in query(prom, expr, at)}
 
 
-def prometheus_results(prom: str, t_end: float, duration: float) -> dict:
+def stored_lag(scenario: str) -> float:
+    """Seconds after the window at which all its spans have been exported."""
+    env = read_env(SCENARIOS_DIR / f"{scenario}.env")
+    extra = TAIL_DECISION_WAIT_S if env.get("COLLECTOR_CONFIG") == "tail" else 0
+    return EXPORT_LAG_S + extra
+
+
+def prometheus_results(prom: str, t_end: float, duration: float, lag_stored: float) -> dict:
     d = f"{round(duration)}s"
     sel = f'{{container_label_com_docker_compose_project="{PROJECT}"}}'
     by = "container_label_com_docker_compose_service"
@@ -170,7 +183,7 @@ def prometheus_results(prom: str, t_end: float, duration: float) -> dict:
     if not query(prom, f'max_over_time(up{{job="otel-collector"}}[{d}]) == 1', at):
         raise RuntimeError("collector was not scraped by Prometheus during the run")
 
-    def spans(metric: str) -> float:
+    def spans(metric: str, at: float) -> float:
         result = query(prom, f'sum(increase({metric}{{job="otel-collector"}}[{d}]))', at)
         return round(float(result[0]["value"][1])) if result else 0
 
@@ -179,8 +192,8 @@ def prometheus_results(prom: str, t_end: float, duration: float) -> dict:
     row |= {f"mem_{col}_mb": round(mem[s] / 2**20, 1) for s, col in CONTAINERS.items()}
     row["mem_services_mb"] = round(sum(mem[s] for s in SERVICES) / 2**20, 1)
     row["collector_rx_bytes"] = round(rx["otel-collector"])
-    row["spans_accepted"] = spans("otelcol_receiver_accepted_spans")
-    row["spans_stored"] = spans("otelcol_exporter_sent_spans")
+    row["spans_accepted"] = spans("otelcol_receiver_accepted_spans", at)
+    row["spans_stored"] = spans("otelcol_exporter_sent_spans", t_end + lag_stored)
     return row
 
 
@@ -241,8 +254,10 @@ def run_once(scenario: str, level: str, rep: int, args: argparse.Namespace) -> d
     log(f"{run_id}: {users} users, {args.warmup:g} s warm-up + {args.duration:g} s measured")
     run_load(scenario, run_id, users, args)
 
-    log(f"{run_id}: draining {args.drain:g} s, then collecting")
-    time.sleep(args.drain)
+    lag = stored_lag(scenario)
+    drain = max(args.drain, lag + 5)
+    log(f"{run_id}: draining {drain:g} s, then collecting")
+    time.sleep(drain)
 
     row = {
         "run_id": run_id, "scenario": scenario, "level": level, "users": users, "rep": rep,
@@ -251,7 +266,7 @@ def run_once(scenario: str, level: str, rep: int, args: argparse.Namespace) -> d
     load, sent = load_requests(run_id, args.slow_threshold_ms)
     row |= load
     t_start, t_end = row["measure_start"], row["measure_end"]
-    row |= prometheus_results(args.prometheus, t_end, t_end - t_start)
+    row |= prometheus_results(args.prometheus, t_end, t_end - t_start, lag)
     # Search a bit past the window: the server starts a trace after the client
     # sent the request, and the order ids decide what counts anyway.
     row |= jaeger_results(args.jaeger, t_start, t_end + END_GRACE_S, sent)
@@ -288,7 +303,10 @@ def main() -> None:
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--warmup", type=int, default=30, help="seconds of load before measuring")
     ap.add_argument("--duration", type=int, default=120, help="measured seconds")
-    ap.add_argument("--drain", type=float, default=20.0, help="seconds to wait after load before collecting")
+    ap.add_argument(
+        "--drain", type=float, default=20.0,
+        help="seconds to wait after load before collecting (raised automatically for tail sampling)",
+    )  # fmt: skip
     ap.add_argument("--slow-threshold-ms", type=float, default=500.0)
     ap.add_argument("--out", type=Path, default=ROOT / "results" / "raw" / "runs.csv")
     ap.add_argument("--prometheus", default="http://localhost:9090")
@@ -313,9 +331,10 @@ def main() -> None:
     # host (temperature, background load) affects all of them alike.
     plan = [(s, lv, r) for r in range(1, args.reps + 1) for lv in levels for s in scenarios]
     todo = [p for p in plan if f"{p[0]}_{p[1]}_r{p[2]}" not in done]
-    per_run_s = 40 + args.warmup + args.duration + args.drain  # ~40 s to recreate the stack
+    # ~40 s to recreate the stack per run.
+    total_s = sum(40 + args.warmup + args.duration + max(args.drain, stored_lag(s) + 5) for s, _, _ in todo)
     log(f"{len(plan)} runs planned, {len(plan) - len(todo)} already in {args.out}, "
-        f"{len(todo)} to go (~{len(todo) * per_run_s / 60:.0f} min)")  # fmt: skip
+        f"{len(todo)} to go (~{total_s / 60:.0f} min)")  # fmt: skip
     if not todo:
         return
 

@@ -236,6 +236,7 @@ them needs no code changes and no rebuild.
 | A | `scenarios/A.env` | none: SDK disabled, no instrumentation, no export | baseline cost of the services alone |
 | B | `scenarios/B.env` | `always_on` | head-based 100%: full tracing overhead |
 | C | `scenarios/C.env` | `parentbased_traceidratio`, `0.1` | head-based 10%: overhead when ~90% of traces are dropped at the source |
+| D | `scenarios/D.env` | `always_on` + collector `tail_sampling` (`COLLECTOR_CONFIG=tail`) | tail-based: services still export 100%, the collector keeps errors, slow traces (> 500 ms) and 10% of the rest; costs collector memory for buffering |
 
 Start (or switch to) a scenario:
 
@@ -273,8 +274,8 @@ machinery as possible without a different image.
 python3 scripts/verify_sampling.py scenarios/C.env
 ```
 
-The script reads the expected ratio from the file (A: 0, B: 1, C: 0.1) and sends
-500 requests. It then compares how many spans the collector stored in Jaeger
+The script reads the expected ratio from the file (A: 0, B: 1, C: 0.1, D: 0.1)
+and sends 500 requests. It then compares how many spans the collector stored in Jaeger
 (the Prometheus counter delta, so traces from earlier scenarios don't count)
 with the expected share. The result must be within 3σ of a binomial, and every
 trace must be complete (a multiple of 19 spans, because ParentBased keeps or drops a trace
@@ -287,6 +288,20 @@ scenario C: expected ratio 0.1
 
   [PASS] whole traces only (1007 spans is a multiple of 19)
   [PASS] ratio 0.106 within 0.1 ± 0.040
+```
+
+For D (tail sampling) the script also checks that the collector *accepted*
+every span (500 x 19: the services still export 100%). It runs without
+`scenarios/faults.env`, so only the 10% probabilistic policy keeps traces:
+
+```
+scenario D: expected ratio 0.1 (tail sampling)
+...
+1121 spans stored = 59 traces of 500 requests (ratio 0.118)
+
+  [PASS] whole traces only (1121 spans is a multiple of 19)
+  [PASS] ratio 0.118 within 0.1 ± 0.040
+  [PASS] services exported every span (9500 accepted = 9500)
 ```
 
 ## Experiment
@@ -312,15 +327,17 @@ Each run:
 2. **Load.** One Locust run: a 30 s warm-up (cold processes, connection pools,
    the first span batches; discarded), then 2 min measured.
 3. **Drain.** Waits 20 s, so the last spans reach Jaeger and the last metrics
-   reach Prometheus.
+   reach Prometheus. With tail sampling (D) the collector holds every trace for
+   `decision_wait` (10 s) before it exports it, so D waits 25 s and reads
+   `spans_stored` 10 s later than the other scenarios.
 4. **Collect.** Reads the Locust request log, Prometheus and Jaeger, then appends
    the row to the CSV.
 
 Runs are interleaved (repetition 1 of every scenario and level, then repetition 2,
 and so on), so slow drift of the host affects all scenarios alike. Runs that are already
 in the CSV are skipped, so after a crash or `Ctrl+C` run the same command again
-and it continues where it stopped. One run takes about 3.5 minutes, so A–C
-(18 runs) take about 1 hour and A–E (30 runs) about 1 h 45 min. See `--help` for
+and it continues where it stopped. One run takes about 3.5 minutes, so A–D
+(24 runs) take about 1 h 25 min and A–E (30 runs) about 1 h 45 min. See `--help` for
 the other options (`--warmup`, `--duration`, `--drain`, `--no-build`, ...).
 
 **Faults.** Every compose call gets `.env` (if present), `scenarios/faults.env`
@@ -396,7 +413,25 @@ and does not change the span status.
 ### Collector config
 
 `COLLECTOR_CONFIG` selects `collector/configs/<name>.yaml` (default: `passthrough`).
-Per-scenario configs (e.g. tail sampling) go in that folder.
+Each scenario file sets it:
+
+| Config | Used by | Pipeline |
+|---|---|---|
+| `passthrough` | A, B, C | `otlp` -> `batch` -> Jaeger: forwards every span it receives |
+| `tail` | D | `otlp` -> `tail_sampling` -> `batch` -> Jaeger |
+
+`tail.yaml` buffers each trace for `decision_wait: 10s` (more than the SDK's
+5 s batch delay plus the longest trace), then keeps it if **any** policy
+matches:
+
+- `errors`: `status_code` `ERROR` on any span;
+- `slow`: trace duration (earliest start to latest end) above 500 ms, the same
+  threshold as `SLOW_DELAY_MS` and the runner's `--slow-threshold-ms`;
+- `baseline`: 10% `probabilistic` by trace ID.
+
+Decision caches keep late spans with their trace's decision. The collector
+also exposes `otelcol_processor_tail_sampling_*` metrics (decisions per policy,
+late spans, traces dropped too early) on its Prometheus endpoint.
 
 ## Repository layout
 
@@ -421,7 +456,7 @@ scripts/verify_trace.py       # end-to-end trace check
 scripts/verify_monitoring.py  # metrics pipeline check
 scripts/verify_sampling.py    # scenario sampling ratio check
 scripts/run_experiment.py     # scenarios x load levels x repetitions -> CSV
-scenarios/             # one env file per experiment scenario (A, B, C)
+scenarios/             # one env file per experiment scenario (A, B, C, D)
 scenarios/faults.env   # fault injection shared by all experiment runs
 load/locustfile.py     # steady load: 1 request/s per user, per-request log
 results/raw/           # experiment CSVs (raw/locust/ = per-run request logs, gitignored)
