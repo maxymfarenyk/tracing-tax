@@ -18,8 +18,14 @@ x-monitoring-limits: &monitoring-limits
   mem_limit: 256m
 
 x-otel-env: &otel-env
+  # Scenario A (no tracing, scenarios/A.env) overrides the next three. The SDK
+  # switch alone only swaps in no-op tracers: opentelemetry-instrument would
+  # still patch FastAPI/httpx/redis and set up the exporter, so A also skips
+  # all instrumentations ("*") and the exporter.
+  OTEL_SDK_DISABLED: ${OTEL_SDK_DISABLED:-false}
+  OTEL_PYTHON_DISABLED_INSTRUMENTATIONS: ${OTEL_PYTHON_DISABLED_INSTRUMENTATIONS:-}
+  OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-otlp}
   # Only traces are in scope; metrics/logs export would add unrelated overhead.
-  OTEL_TRACES_EXPORTER: otlp
   OTEL_METRICS_EXPORTER: none
   OTEL_LOGS_EXPORTER: none
   OTEL_EXPORTER_OTLP_PROTOCOL: grpc
