@@ -54,7 +54,7 @@ dependency tree, including transitive packages and hashes, is locked in
 ## Requirements
 
 - Docker with Compose v2
-- Python 3.10+ on the host (only for the stdlib verification scripts)
+- Python 3.10+ on the host (only for the stdlib verification and experiment scripts)
 - [uv](https://docs.astral.sh/uv/) `0.12.x`, only for local development and IDE support
 - Free host ports `8080` (gateway), `16686` (Jaeger UI), `9090` (Prometheus),
   `3000` (Grafana) and `8089` (Locust web UI)
@@ -289,6 +289,69 @@ scenario C: expected ratio 0.1
   [PASS] ratio 0.106 within 0.1 ± 0.040
 ```
 
+## Experiment
+
+`scripts/run_experiment.py` runs every scenario at both load levels, three
+times, and writes one CSV row per run to `results/raw/runs.csv`. It needs only
+Docker and the host Python (stdlib only).
+
+```bash
+# Pilot: 2 scenarios, 1 load level, 1 repetition (~8 min)
+python3 scripts/run_experiment.py --scenarios A,B --levels high --reps 1 --out results/raw/pilot.csv
+
+# Full experiment: all scenarios/[A-Z].env x low, high x 3 repetitions
+python3 scripts/run_experiment.py
+```
+
+Each run:
+
+1. **Restart.** Recreates the measured containers (the four services, Redis, the
+   collector and Jaeger), so every run starts with fresh processes, empty
+   Jaeger storage and zeroed collector counters. Prometheus, cAdvisor and
+   Grafana keep running.
+2. **Load.** One Locust run: a 30 s warm-up (cold processes, connection pools,
+   the first span batches; discarded), then 2 min measured.
+3. **Drain.** Waits 20 s, so the last spans reach Jaeger and the last metrics
+   reach Prometheus.
+4. **Collect.** Reads the Locust request log, Prometheus and Jaeger, then appends
+   the row to the CSV.
+
+Runs are interleaved (repetition 1 of every scenario and level, then repetition 2,
+and so on), so slow drift of the host affects all scenarios alike. Runs that are already
+in the CSV are skipped, so after a crash or `Ctrl+C` run the same command again
+and it continues where it stopped. One run takes about 3.5 minutes, so A–C
+(18 runs) take about 1 hour and A–E (30 runs) about 1 h 45 min. See `--help` for
+the other options (`--warmup`, `--duration`, `--drain`, `--no-build`, ...).
+
+**Faults.** Every compose call gets `.env` (if present), `scenarios/faults.env`
+and the scenario file, so fault injection is identical in all scenarios:
+`payments` fails 5% of requests and delays another, independent 5% by 500 ms.
+Without faults there would be nothing to measure in the error/slow retention columns.
+
+**Counting kept traces.** Locust sends every request with a unique order ID and
+logs it (`results/raw/locust/<run_id>.json`, gitignored). The runner looks up
+each request from the measured window in Jaeger by that ID (it is part of the
+root span's URL). Error and slow are decided once, from what the client saw:
+an error is a failed response (5xx), and slow means at least 500 ms. So
+"kept" never exceeds "sent". Requests started in the last 5 s of the window
+are not counted, because they may still be in flight when Locust stops.
+
+| Columns | Source | Meaning |
+|---|---|---|
+| `run_id`, `scenario`, `level`, `users`, `rep`, `started_at`, `warmup_s`, `duration_s` | runner | run identity and settings |
+| `measure_start`, `measure_end` | Locust | measured window (Unix time) |
+| `requests`, `rps`, `p50_ms`, `p95_ms`, `p99_ms` | Locust log | requests in the window, their rate and exact latency percentiles |
+| `errors_sent`, `slow_sent` | Locust log | failed / slow (≥ 500 ms) requests among them |
+| `cpu_<container>`, `cpu_services` | cAdvisor | mean CPU in cores over the window; `services` = sum of the four services |
+| `mem_<container>_mb`, `mem_services_mb` | cAdvisor | mean memory working set, MiB |
+| `collector_rx_bytes` | cAdvisor | bytes received by the collector container in the window |
+| `spans_accepted`, `spans_stored` | collector | spans received from the services / written to Jaeger |
+| `traces_kept`, `errors_kept`, `slow_kept` | Jaeger | sent requests whose trace is in Jaeger |
+| `errors_kept_share`, `slow_kept_share` | derived | `errors_kept / errors_sent`, `slow_kept / slow_sent` |
+
+Containers are `gateway`, `orders`, `payments`, `inventory`, `redis`, `collector`
+and `jaeger`.
+
 ## Configuration
 
 All knobs are environment variables read by `docker-compose.yml`. Pass them on the
@@ -322,7 +385,8 @@ Each service has its own variables, prefixed with its name (`GATEWAY_`, `ORDERS_
 | `PAYMENTS_WORK_MS` | `30` | Simulated payment provider call in `payments` |
 
 Inside the containers these map to `ERROR_RATE`, `SLOW_RATE`, `SLOW_DELAY_MS`
-(default 500) and `WORK_MS` (see `services/common/faults.py`).
+(default 500) and `WORK_MS` (see `services/common/faults.py`). The experiment
+sets them through `scenarios/faults.env` (see [Experiment](#experiment)).
 
 A failure anywhere downstream propagates up: the failing service answers `500`,
 and every caller above it answers `502` (`services/common/downstream.py`). All
@@ -356,9 +420,12 @@ monitoring/
 scripts/verify_trace.py       # end-to-end trace check
 scripts/verify_monitoring.py  # metrics pipeline check
 scripts/verify_sampling.py    # scenario sampling ratio check
+scripts/run_experiment.py     # scenarios x load levels x repetitions -> CSV
 scenarios/             # one env file per experiment scenario (A, B, C)
-load/locustfile.py     # steady load: 1 request/s per user
-results/               # experiment output (results/load/ = ad-hoc runs, gitignored)
+scenarios/faults.env   # fault injection shared by all experiment runs
+load/locustfile.py     # steady load: 1 request/s per user, per-request log
+results/raw/           # experiment CSVs (raw/locust/ = per-run request logs, gitignored)
+results/load/          # ad-hoc Locust runs (gitignored)
 docker-compose.yml
 pyproject.toml         # uv project (non-package) for host-side tooling
 ```

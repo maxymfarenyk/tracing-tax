@@ -40,8 +40,10 @@ STORED = 'otelcol_exporter_sent_spans{job="otel-collector"}'
 FRESH = "sum(last_over_time({sel}[10s]))"
 
 
-def query(prom: str, expr: str) -> list[dict]:
-    url = f"{prom}/api/v1/query?" + urllib.parse.urlencode({"query": expr})
+def query(prom: str, expr: str, at: float | None = None) -> list[dict]:
+    """Instant query, evaluated now or at the Unix time `at`."""
+    params = {"query": expr} if at is None else {"query": expr, "time": f"{at:.3f}"}
+    url = f"{prom}/api/v1/query?" + urllib.parse.urlencode(params)
     with urllib.request.urlopen(url, timeout=5) as resp:
         body = json.load(resp)
     if body.get("status") != "success":

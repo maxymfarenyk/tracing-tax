@@ -35,6 +35,8 @@ REDIS_SPANS = 2
 
 # OTLP SpanKind enum; Jaeger's /api/v3 returns it as an integer.
 _KINDS = {0: "UNSPECIFIED", 1: "INTERNAL", 2: "SERVER", 3: "CLIENT", 4: "PRODUCER", 5: "CONSUMER"}
+# OTLP StatusCode enum; an unset status comes back as an empty object.
+_STATUSES = {0: "UNSET", 1: "OK", 2: "ERROR"}
 
 
 def _id(raw: str) -> str:
@@ -48,6 +50,13 @@ def _kind(raw) -> str:
     if isinstance(raw, int):
         return _KINDS.get(raw, str(raw))
     return str(raw).removeprefix("SPAN_KIND_")
+
+
+def _status(raw: dict | None) -> str:
+    code = (raw or {}).get("code", 0)
+    if isinstance(code, int):
+        return _STATUSES.get(code, str(code))
+    return str(code).removeprefix("STATUS_CODE_")
 
 
 def _attrs(attrs: list[dict] | None) -> dict[str, str]:
@@ -66,6 +75,7 @@ def _flatten(body: dict) -> list[dict]:
                         "service": service,
                         "name": s["name"],
                         "kind": _kind(s.get("kind", 0)),
+                        "status": _status(s.get("status")),
                         "span_id": _id(s["spanId"]),
                         "parent_id": _id(s["parentSpanId"]) if s.get("parentSpanId") else None,
                         "start": int(s["startTimeUnixNano"]),
@@ -82,9 +92,9 @@ def _is_redis(span: dict) -> bool:
     return span["kind"] == "CLIENT" and "redis" in (a.get("db.system"), a.get("db.system.name"))
 
 
-def _get(url: str) -> dict:
+def _get(url: str, timeout_s: float = 5.0) -> dict:
     try:
-        with urllib.request.urlopen(url, timeout=5) as resp:
+        with urllib.request.urlopen(url, timeout=timeout_s) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:  # nothing found (yet)
