@@ -1,7 +1,7 @@
 # Scenario-agnostic pass-through pipeline: every span received is forwarded.
-# Used for "no collector-side sampling" scenarios (B, C). Tail sampling
-# scenarios (D) will get their own file in this folder and are selected via
-# COLLECTOR_CONFIG in docker-compose.yml.
+# Used for "no collector-side sampling" scenarios (A, B, C). Tail sampling
+# (scenario D) uses tail.yaml; the file is selected via COLLECTOR_CONFIG in
+# docker-compose.yml.
 
 extensions:
   health_check:
