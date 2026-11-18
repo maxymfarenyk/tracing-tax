@@ -226,6 +226,69 @@ everything behind it), and it applies **its own** environment to them. If you
 start the stand with e.g. `ORDERS_ERROR_RATE=0.1`, pass the same variables to
 `docker compose run`, or Compose will quietly recreate `orders` without them.
 
+## Scenarios
+
+Each experiment scenario is a small env file in `scenarios/`. Switching between
+them needs no code changes and no rebuild.
+
+| Scenario | File | Sampler | Measures |
+|---|---|---|---|
+| A | `scenarios/A.env` | none: SDK disabled, no instrumentation, no export | baseline cost of the services alone |
+| B | `scenarios/B.env` | `always_on` | head-based 100%: full tracing overhead |
+| C | `scenarios/C.env` | `parentbased_traceidratio`, `0.1` | head-based 10%: overhead when ~90% of traces are dropped at the source |
+
+Start (or switch to) a scenario:
+
+```bash
+docker compose --env-file .env --env-file scenarios/C.env up -d --wait
+```
+
+`--env-file` **replaces** the default `.env` instead of adding to it, so pass
+`.env` first if you have one (e.g. for `DOCKER_DATA_ROOT`). The later file wins.
+Leave out `--env-file .env` if you have no `.env`. Variables exported in your
+shell override both files. Compose recreates only the containers whose settings
+changed, which are the four services. Jaeger keeps its stored traces across the switch.
+
+Pass the same flags when you generate load. Otherwise `docker compose run`
+recreates the services with the defaults (see [Load generation](#load-generation)):
+
+```bash
+docker compose --env-file .env --env-file scenarios/C.env run --rm locust \
+    --headless --users 30 --spawn-rate 30 --run-time 2m --csv /mnt/results/load/C_high --only-summary
+```
+
+Without a scenario file, the stack runs with the compose defaults
+(`parentbased_always_on`), which behave like B.
+
+**Why A sets three variables.** `OTEL_SDK_DISABLED=true` alone only replaces
+the tracers with no-op ones: `opentelemetry-instrument` would still patch
+FastAPI, httpx and redis, and set up the exporter. A also sets
+`OTEL_PYTHON_DISABLED_INSTRUMENTATIONS=*` (skip all instrumentations) and
+`OTEL_TRACES_EXPORTER=none`, so the baseline carries as little tracing
+machinery as possible without a different image.
+
+**Verify a scenario:**
+
+```bash
+python3 scripts/verify_sampling.py scenarios/C.env
+```
+
+The script reads the expected ratio from the file (A: 0, B: 1, C: 0.1) and sends
+500 requests. It then compares how many spans the collector stored in Jaeger
+(the Prometheus counter delta, so traces from earlier scenarios don't count)
+with the expected share. The result must be within 3σ of a binomial, and every
+trace must be complete (a multiple of 19 spans, because ParentBased keeps or drops a trace
+as a whole):
+
+```
+scenario C: expected ratio 0.1
+...
+1007 spans stored = 53 traces of 500 requests (ratio 0.106)
+
+  [PASS] whole traces only (1007 spans is a multiple of 19)
+  [PASS] ratio 0.106 within 0.1 ± 0.040
+```
+
 ## Configuration
 
 All knobs are environment variables read by `docker-compose.yml`. Pass them on the
@@ -234,22 +297,20 @@ command line, e.g. `ORDERS_ERROR_RATE=0.1 docker compose up -d`, or put them in 
 
 ### Sampling (standard OTel SDK env vars only; there is no sampling code)
 
+Normally set through a scenario file (see [Scenarios](#scenarios)).
+
 | Variable | Default | Examples |
 |---|---|---|
 | `OTEL_TRACES_SAMPLER` | `parentbased_always_on` | `always_on`, `always_off`, `parentbased_traceidratio` |
 | `OTEL_TRACES_SAMPLER_ARG` | `1.0` | `0.1`, `0.01` (ratio for `*traceidratio`) |
+| `OTEL_SDK_DISABLED` | `false` | `true` (scenario A) |
+| `OTEL_PYTHON_DISABLED_INSTRUMENTATIONS` | empty | `*` (scenario A), `redis` |
+| `OTEL_TRACES_EXPORTER` | `otlp` | `none` (scenario A) |
 
-```bash
-# head-based 10%
-OTEL_TRACES_SAMPLER=parentbased_traceidratio OTEL_TRACES_SAMPLER_ARG=0.1 docker compose up -d
-```
-
-`scripts/verify_trace.py` assumes 100% sampling.
+`scripts/verify_trace.py` and `scripts/verify_monitoring.py` assume 100% sampling (B).
 
 ### Fault injection
 
-| Variable | Default | Meaning |
-|---|---|---|
 Each service has its own variables, prefixed with its name (`GATEWAY_`, `ORDERS_`,
 `INVENTORY_`, `PAYMENTS_`):
 
@@ -294,6 +355,8 @@ monitoring/
   grafana/dashboards/    # tracing-tax.json dashboard
 scripts/verify_trace.py       # end-to-end trace check
 scripts/verify_monitoring.py  # metrics pipeline check
+scripts/verify_sampling.py    # scenario sampling ratio check
+scenarios/             # one env file per experiment scenario (A, B, C)
 load/locustfile.py     # steady load: 1 request/s per user
 results/               # experiment output (results/load/ = ad-hoc runs, gitignored)
 docker-compose.yml
