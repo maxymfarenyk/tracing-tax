@@ -55,7 +55,8 @@ dependency tree, including transitive packages and hashes, is locked in
 
 - Docker with Compose v2
 - Python 3.10+ on the host (only for the stdlib verification and experiment scripts)
-- [uv](https://docs.astral.sh/uv/) `0.12.x`, only for local development and IDE support
+- [uv](https://docs.astral.sh/uv/) `0.12.x`, for the analysis script (pandas,
+  matplotlib) and for local development and IDE support
 - Free host ports `8080` (gateway), `16686` (Jaeger UI), `9090` (Prometheus),
   `3000` (Grafana) and `8089` (Locust web UI)
 - If your Docker daemon uses a non-default `data-root` (check with
@@ -374,6 +375,35 @@ are not counted, because they may still be in flight when Locust stops.
 Containers are `gateway`, `orders`, `payments`, `inventory`, `redis`, `collector`
 and `jaeger`.
 
+## Analysis
+
+`analysis/analyze.py` turns the experiment CSV into the summary table and
+charts for the report. It needs uv (pandas and matplotlib are pinned in the
+root `pyproject.toml`).
+
+```bash
+uv run analysis/analyze.py                          # results/raw/runs.csv
+uv run analysis/analyze.py results/raw/pilot.csv    # any CSV(s) from the runner
+```
+
+Several CSVs are merged (run IDs must not repeat). Every metric is aggregated
+per scenario and load level as mean ± sample SD over the repetitions; with a
+single repetition only the mean is shown. Output goes to `results/analysis/`
+(`--out` to change it) and is overwritten on every run:
+
+| File | Content |
+|---|---|
+| `summary.md` | one Markdown table for the report (RPS, latency, CPU, RAM, network, spans, kept shares) |
+| `summary.csv` | the same numbers in long form: `scenario, level, metric, mean, sd, n` |
+| `cpu_services.png` | CPU of the four services, cores |
+| `latency.png` | p95 and p99 latency, ms |
+| `collector_network.png` | traffic into the collector, KiB/s (`collector_rx_bytes / duration_s`) |
+| `collector_memory.png` | collector working set, MiB |
+| `traces_kept.png` | share of error and slow traces kept, % |
+
+All charts are grouped bars: one group per scenario, one bar per load level,
+error bars = SD.
+
 ## Configuration
 
 All knobs are environment variables read by `docker-compose.yml`. Pass them on the
@@ -485,10 +515,12 @@ scripts/verify_trace.py       # end-to-end trace check
 scripts/verify_monitoring.py  # metrics pipeline check
 scripts/verify_sampling.py    # scenario sampling ratio check
 scripts/run_experiment.py     # scenarios x load levels x repetitions -> CSV
+analysis/analyze.py    # CSV -> summary table and charts (uv run)
 scenarios/             # one env file per experiment scenario (A-E)
 scenarios/faults.env   # fault injection shared by all experiment runs
 load/locustfile.py     # steady load: 1 request/s per user, per-request log
 results/raw/           # experiment CSVs (raw/locust/ = per-run request logs, gitignored)
+results/analysis/      # summary table and charts from analysis/analyze.py
 results/load/          # ad-hoc Locust runs (gitignored)
 docker-compose.yml
 pyproject.toml         # uv project (non-package) for host-side tooling
