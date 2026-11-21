@@ -77,29 +77,40 @@ and `jaeger`.
 
 ## Analysis
 
-`analysis/analyze.py` turns the experiment CSV into the summary table and
-charts for the report. It needs uv (pandas and matplotlib are pinned in the
-root `pyproject.toml`).
+`analysis/analyze.py` turns the experiment CSV into the summary tables and
+charts for the report. It needs uv (pandas, matplotlib and scipy are pinned
+in the root `pyproject.toml`).
 
 ```bash
 uv run analysis/analyze.py                          # results/raw/runs.csv
+uv run analysis/analyze.py --lang uk                # Ukrainian charts
 uv run analysis/analyze.py results/raw/pilot.csv    # any CSV(s) from the runner
 ```
 
 Several CSVs are merged (run IDs must not repeat). Every metric is aggregated
-per scenario and load level as mean ± sample SD over the repetitions; with a
-single repetition only the mean is shown. Output goes to `results/analysis/`
-(`--out` to change it) and is overwritten on every run:
+per scenario and load level as mean ± sample SD over the repetitions and a
+95% confidence interval of the mean,
+mean ± t(0.975, n − 1) · SD / √n, with the Student's t quantile computed by
+scipy (4.303 for n = 3). With a single repetition only the mean is shown.
+Output goes to `results/analysis/` (`--out` to change it) and is overwritten
+on every run:
 
 | File | Content |
 |---|---|
-| `summary.md` | one Markdown table for the report (RPS, latency, CPU, RAM, network, spans, kept shares) |
-| `summary.csv` | the same numbers in long form: `scenario, level, metric, mean, sd, n` |
+| `summary.md` | two Markdown tables for the report: mean ± SD of every metric (RPS, latency, CPU, RAM, network, spans, kept shares), and mean [95% CI] of the key metrics (service CPU, p50, p99, network, spans stored/s, collector RAM, kept shares) |
+| `summary.csv` | the same numbers in long form: `scenario, level, metric, mean, sd, n, ci_low, ci_high` |
 | `cpu_services.png` | CPU of the four services, cores |
-| `latency.png` | p95 and p99 latency, ms |
+| `latency.png` | p50 and p99 latency, ms (p95 is left out: the 5% slow fault sits right at it, see [results.md](results.md#limitations)) |
 | `collector_network.png` | traffic into the collector, KiB/s (`collector_rx_bytes / duration_s`) |
 | `collector_memory.png` | collector working set, MiB |
 | `traces_kept.png` | share of error and slow traces kept, % |
 
 All charts are grouped bars: one group per scenario, one bar per load level,
-error bars = SD.
+error bars = SD (stated in each chart's subtitle). The legend sits below the
+plot, so it never covers the title or the bars.
+
+`--lang` selects the chart language: `en` (default) or `uk`. With `--lang uk`
+titles, axis labels, legends and scenario names are in Ukrainian (strategy
+terms such as head and tail-based stay in English) and the charts go to
+`results/analysis/uk/`; the summary files are written to
+`results/analysis/` as usual and are the same for both languages.
