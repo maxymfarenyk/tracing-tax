@@ -138,8 +138,8 @@ not saved. Change the JSON file instead.
 
 | Row | Panels | Source |
 |---|---|---|
-| Containers | CPU (100% = one core), memory working set, network RX/TX per compose service | cAdvisor |
-| OTel Collector | Network into/out of the collector, spans accepted / refused / sent / failed, exporter queue | cAdvisor + collector self-metrics |
+| Containers | CPU (100% = one core), memory working set, network received per compose service | cAdvisor |
+| OTel Collector | Spans accepted / s, network into the collector, spans refused or failed (should stay 0), exporter queue; network into/out of the collector and spans accepted vs sent to Jaeger over time | cAdvisor + collector self-metrics |
 
 Use the *Service* dropdown to filter the container panels. Useful metrics for
 your own queries in Prometheus:

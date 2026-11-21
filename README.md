@@ -170,9 +170,9 @@ jaeger/, monitoring/   # Jaeger, Prometheus and Grafana config
 load/locustfile.py     # steady load: 1 request/s per user
 scenarios/             # A-E env files + faults.env
 scripts/               # verify_*.py checks, run_experiment.py
-analysis/analyze.py    # CSV -> summary table and charts
+analysis/analyze.py    # CSV -> summary tables and charts (--lang en/uk)
 results/raw/runs.csv   # final dataset (30 runs)
-results/analysis/      # summary table and charts
+results/analysis/      # summary tables and charts (uk/: Ukrainian charts)
 docs/                  # results, experiment and stand details
 docker-compose.yml
 ```
