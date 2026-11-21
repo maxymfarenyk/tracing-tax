@@ -8,11 +8,12 @@ authors = [
 ]
 requires-python = ">=3.14"
 # Host-side tooling goes here (the stdlib scripts in scripts/ need none;
-# analysis/ needs pandas and matplotlib).
+# analysis/ needs pandas, matplotlib and scipy).
 # The containerised services have their own lock: services/requirements.txt.
 dependencies = [
     "matplotlib==3.11.2",
     "pandas==3.1.1",
+    "scipy==1.18.1",
 ]
 
 [tool.uv]
