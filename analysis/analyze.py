@@ -124,6 +124,9 @@ CHARTS = {
     "collector_memory": ["mem_collector_mb"],
     "traces_kept": ["errors_kept_pct", "slow_kept_pct"],
 }
+# Charts whose panels get their own y-axis: p99 is ~4x p50, so on a shared
+# axis the p50 differences between scenarios would be hard to see.
+OWN_Y_AXIS = {"latency"}
 
 # Reference categorical palette (dataviz skill), slots 1-2, light mode.
 LEVEL_COLORS = {"low": "#2a78d6", "high": "#eb6834"}
@@ -245,7 +248,8 @@ def tick_label(name: str) -> str:
 def bar_chart(agg: pd.DataFrame, chart: str, lang: str, path: Path) -> None:
     """Grouped bars: x = scenario, one bar per load level, error bars = SD.
 
-    Several panels share the y-axis unit. Layout is fixed in inches: a header
+    Several panels share the y-axis unit, and the axis itself unless the chart
+    is in OWN_Y_AXIS. Layout is fixed in inches: a header
     band for title + subtitle, a footer band for the legend, axes in between,
     so the legend never overlaps the title, the ticks or a bar.
     """
@@ -261,7 +265,8 @@ def bar_chart(agg: pd.DataFrame, chart: str, lang: str, path: Path) -> None:
 
     width_in = 4.4 * len(metrics) + 1.2
     height_in, header_in, footer_in = 4.4, 0.75, 0.45
-    fig, axes = plt.subplots(1, len(metrics), figsize=(width_in, height_in), sharey=True, squeeze=False)
+    shared_y = chart not in OWN_Y_AXIS
+    fig, axes = plt.subplots(1, len(metrics), figsize=(width_in, height_in), sharey=shared_y, squeeze=False)
     for ax, metric in zip(axes[0], metrics):
         for i, level in enumerate(levels):
             means = [agg[(metric, "mean")].get((s, level), np.nan) for s in scenarios]
@@ -285,8 +290,9 @@ def bar_chart(agg: pd.DataFrame, chart: str, lang: str, path: Path) -> None:
         ax.spines[["top", "right", "left"]].set_visible(False)
         ax.spines["bottom"].set_color(TEXT_MUTED)
         ax.tick_params(colors=TEXT_MUTED, length=0, labelsize=9)
-    # After all panels are drawn: the shared y-axis must fit every panel.
-    axes[0][0].set_ylim(bottom=0)
+    # After all panels are drawn: a shared y-axis must fit every panel.
+    for ax in axes[0] if not shared_y else axes[0][:1]:
+        ax.set_ylim(bottom=0)
     axes[0][0].set_ylabel(ylabel, color=TEXT_MUTED)
 
     pad_x = 0.12 / width_in
